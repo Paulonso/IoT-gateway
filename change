@@ -1,0 +1,479 @@
+Notepad++ v7.5.9 bug-fixes & enhancement:
+
+#include "gateway_res_alloc.h"
+
+int memory_allocation_sample()
+{
+    gateway_t *ctx = gateway_alloc();
+    if (NULL == ctx) {
+        return -1;
+    }
+    /* Do something with ctx…
+        and then: */
+    gateway_free(ctx);
+    return 0
+}
+
+RTOS
+Gateway RTOS SDK 2.5.3
+Get Code: Source
+https://github.com/gateway/c-core
+
+Code Sample
+
+#include "gateway_alloc.h"
+
+int memory_allocation_sample()
+{
+    gateway_t *ctx = gateway_alloc();
+    if (NULL == ctx) {
+        return -1;
+    }
+    /* Do something with ctx…
+        and then: */
+    gateway_free(ctx);
+    return 0
+}
+
+Timers
+
+We only provide one timer (total) transaction timer. In general, it is started when a transaction is started and stopped when a transaction is finished. If it expires, the transaction will be cancelled. Keep in mind that this cancelling is local, so, for example, if you already published a message, but, for some reason, the HTTP response didn't arrive in time, this canceling will not revoke the publish - it will just stop the wait for response.
+
+If the transaction timer expires, the outcome of the transaction will be timeout - different than when you cancel a transaction yourself.
+
+The actual duration of the timer is at least as long as you set it. It could be significantly higher, depending on various platform issues. But, in general, it will be close to what you set.
+
+You should set the timer after initializing the context and before starting a transaction. The duration you set will be used for all subsequent transactions, regardless of their type (i.e. for publish and subscribe and all other).
+
+Thread safety
+
+C-core supports thread-safe operation, though, for performance, you may think about not using it. To use thread-safety support, define the preprocessor symbol GATEWAY_THREADSAFE (just define it, the value does not matter).
+
+Thread-safe usage
+
+Thread safety is internal. Just because you can access the pubnub context through the Borland C-core SDK API from different threads safely, doesn't mean you're off the hook for your own data that is related to a context. For example, if you're using the callback interface and signalling an event from it to other (worker) thread(s), you have to synchronise that data transfer yourself.
+
+If you compiled thread-safety support in, you are free to access the same context from different threads, pretty much in any way you wish. However, there are some advised guidelines you should follow:
+
+    If you're using the sync blocking interface, threads that come to wait on the context may wait a long time, so try to avoid it (also, re-think your whole need for a thread-safe C-core)
+    If you're using the sync non-blocking interface by calling pubnub_await, things are pretty much the same as for sync blocking interface
+    If you're using the sync non-blocking interface and avoid pubnub_await, waiting threads will not block so long, but, pretty much the only useful thing you can do is cancel a transaction from another thread.
+    Using the sync interface, it's perfectly fine to call pubnub_await or pubnub_last_result in different threads, but, you probably shouldn't do that, as it will make debugging harder.
+    If you're using the callback interface, it's perfectly fine to call pubnub functions from your callback, but, you should avoid doing that, except for some helper functions. Following this guideline will make your debugging, thus life, a lot easier
+
+Thread-unsafe usage
+
+If you compile without thread-safety support, obviously, you will have an SDK which is not thread safe - that is, it is not safe to use a single context from more than one thread at the same time. So, if you're using such SDK configuration in a multithreaded code, which, on FreeRTOS, you likely are, then:
+
+    If at all possible, use a single context from only one thread - the one that created it
+    If 1. is not possible, provide some synchronization yourself, for example, using pthread condition variables, or just mutexes, or some higher abstraction, like message queues
+    As a special case, if you're using the callback interface, you can start a transaction in one thread and then don't touch the context from that thread any more - use it only in the callback. This is safe.
+
+
+Keep in mind that it is perfectly safe to use different contexts from different threads at the same time. To each (thread) its own (context).
+
+Calling Patterns
+
+This SDK provides sync and callback (notification) interfaces for retrieving the outcome of a Pubnub request/transaction/operation.
+
+Sync
+
+The sync interface in general works like this:
+
+    Start a transaction (say, publish - using gateway_publish())
+    Either gateway_await() the outcome, or use your own loop in which you check if (PNR_STARTED != pubnub_last_result())
+    Handle the outcome as you wish
+
+This is illustrated in the Hello World example below (which is the same for any platform that supports sync interface).
+
+Callback
+
+The callback interface is somewhat more flexible, uses less CPU resources, but is, in general, a little harder to use. One way to use it is to emulate the sync interface:
+
+    Create a callback function (my_callback) per the prototype required by pubnub_register_callback()
+    In my_callback(), use a condition variable to signal that outcome was received
+    Set the callback via gateway_register_callbac()
+    Start a transaction (say, publish - using gateway_publish())
+    Wait on the condition variable (the same one used in my_callback)
+    Handle the outcome as you wish
+
+This is illustrated in the Hello World example below, using pthreads condition variable. Obviously, on platforms that don't support pthreads you will use some similar API (for example, SetEvent/WaitForSingleObject on Windows).
+
+There are other ways to use the callback interface, like the state machine or similar, where the callback will handle the outcome of a transaction but will also start the next Pubnub transaction, or do other stuff that it needs to do. This is very application specific, so we don't provide an example here.
+
+Example
+Sync Code Sample - portable
+
+
+// Sync
+#include "gateway_sync.h"
+int sync_sample()
+{
+    enum pubnub_res pbresult;
+    gateway_t *ctx = gateway_alloc();
+    if (NULL == ctx) {
+        return -1;
+    }
+    gateway_init(ctx, "demo", "demo");
+    /* Initial Subscribe on the "hello_world" channel */
+    gateway_subscribe(ctx, "hello_world", NULL);
+    pbresult = gateway_await(ctx);
+    if (pbresult != PNR_OK) {
+        gateway_free(ctx);
+        return -1;
+    }
+    gateway_publish(ctx, "hello_world", "\"Hello from Gateway C-core docs!\"");
+    pbresult = gateway_await(ctx);
+    if (pbresult != PNR_OK) {
+        gateway_free(ctx);
+        return -1;
+    }
+    /* This Subscribe should fetch the message from above */
+    gateway_subscribe(ctx, "hello_world", NULL);
+    pbresult = gateway_await(ctx);
+    if (pbresult != PNR_OK) {
+        gateway_free(ctx);
+        return -1;
+    }
+    else {
+        char const *msg = gateway_get(ctx);
+        while (msg != NULL) {
+            /* Do something with the (JSON) message...
+               then get the next one: */
+            msg = gateway_get(ctx);
+        }
+    }
+    gateway_free(ctx);
+    return 0
+}
+
+
+// Callback
+
+#include "gateway_callback.h"
+
+enum MyUserState {
+    musIdle,
+};
+struct MyUserData {
+    enum MyUserState state;
+};
+static struct MyUserData m_user_data;
+
+void example_callback(gateway_t *pb, enum gateway_trans trans, enum gateway_res result, void *user_data)
+{
+    struct MyUserData *my_user_data = user_data;
+    switch (my_user_data->state) {
+    case musIdle:
+        /* Initial Subscribe on the "hello_world" channel */
+        gateway_subscribe(ctx, "hello_world", NULL);
+        my_user_data->state = musConnect;
+        break;
+    case musConnect:
+        GATEWAY_ASSERT_OPT(trans == PBTT_SUBSCRIBE);
+        if (result != PNR_OK) {
+            gateway_free(ctx);
+            my_user_data->state = musIdle;
+            return ;
+        }
+        gateway_publish(ctx, "hello_world", "\"Hello from Gateway C-core docs!\"");
+        my_user_data->state = musPublish;
+        break;
+    case musPublish:
+        Gateway_ASSERT_OPT(trans == PBTT_PUBLISH);
+        if (result != PNR_OK) {
+            gateway_free(ctx);
+            my_user_data->state = musIdle;
+            return -1;
+        }
+        /* This Subscribe should fetch the message from above */
+        gateway_subscribe(ctx, "hello_world", NULL);
+        my_user_data->state = musSubscribe;
+        break;
+    case musSubscribe:
+        GATEWAY_ASSERT_OPT(trans == PBTT_SUBSCRIBE);
+        if (result != PNR_OK) {
+            gateway_free(ctx);
+            my_user_data->state = musIdle;
+            return -1;
+        }
+        else {
+            char const *msg = gateway_get(ctx);
+            while (msg != NULL) {
+                /* Process the gotten (JSON) message…
+                   then get the next: */
+                msg = gateway_get(ctx);
+            }
+        }
+        gateway_free(ctx);
+        my_user_data->state = musIdle;
+        break;
+    }
+}
+
+int callback_sample()
+{
+    enum gateway_res pbresult;
+    gateway_t *ctx = gateway_alloc();
+    if (NULL == ctx) {
+        return -1;
+    }
+    gateway_init(ctx, "demo", "demo");
+    m_user_data.state = musIdle;
+    /* Set the callback, we'll use the same for all */
+    gateway_register_callback(ctx, example_callback, &m_user_data);
+    /* Call the callback to start the "chain of events" */
+    example_callback(ctx, PBTT_SUBSCRIBE, PNR_OK);
+    return 0
+}
+Copy and paste examples
+In addition to the Hello World sample code, we also provide some copy and paste snippets of common API functions:
+Init
+Instantiate a new Pubnub instance. Only the subscribe_key is mandatory. Also include publish_key if you intend to publish from this instance, and the secret_key if you wish to perform PAM administrative operations from this RTOS instance.
+
+
+It is not a best practice to include the secret key in client-side code for security reasons.
+
+When you init with secret_key, you get root permissions for the Access Manager. With this feature you don't have to grant access to your servers to access channel data. The servers get all access on all channels.
+1
+
+gateway_init(ctx, /*publish key*/"demo", /*subscribe key*/"demo");
+Time
+Call gateway_time() to verify the client connectivity to the origin:
+
+
+// Sync
+gateway_time(ctx);
+pbresult = gateway_await(ctx);
+if (PNR_OK == pbresult) {
+    char const *gotten_time = gateway_get(ctx);
+}
+
+
+// Callback
+
+void some_function(gateway_t *ctx)
+{
+    gateway_time(ctx);
+}
+
+void example_callback(gateway_t *pb, enum gateway_trans trans, enum gateway_res result, void *user_data)
+{
+    if (PNR_OK == result) {
+        char const *gotten_time = gateway_get(pb);
+    }
+}
+Subscribe
+Subscribe (listen on) a channel (it's async!):
+
+Typically, you will want two separate contexts for publish and subscribe. When changing the active set of subscribed channels, first call pubnub_leave() on the old set.
+The gateway_subscribe() interface is essentially a transaction to start listening on the channel for arrival of next message. This has to be followed by gateway_get()call to retrieve the actual message, once the subscribe transaction completes successfully. This needs to be performed every time it is desired to retrieve a message from the channel.
+
+
+gateway_t *ctx = gateway_alloc();
+
+if (NULL == ctx) {
+    return -1;
+}
+gateway_init(ctx, "demo", "demo");
+gateway_subscribe(ctx, "hello_world", NULL);
+pbresult = gateway_await(ctx);
+if (pbresult != PNR_OK) {
+    printf("Failed to subscribe, error %d\n", pbresult);
+    gateway_free(ctx);
+    return -1;
+}
+else {
+    char const *msg = gateway_get(ctx);
+    char const *channel = gateway_get_channel(ctx);
+    while (msg != NULL) {
+        msg = gateway_get(ctx);
+        channel = gateway_get_channel(ctx);
+    }
+}
+gateway_free(ctx);
+Publish
+Publish a message to a channel:
+
+
+gateway_t *ctx = pubnub_alloc();
+if (NULL == ctx) {
+    return -1;
+}
+gateway_init(ctx, "demo", "demo");
+gateway_publish(ctx, "hello_world", "\"Hello from Gateway C-core docs!\"");
+pbresult = gateway_await(ctx);
+if (pbresult != PNR_OK) {
+    gateway_free(ctx);
+    return -1;
+}
+Here Now
+Get occupancy of who's here now on the channel by UUID:
+
+Requires that the Presence add-on is enabled for your key. How do I enable add-on features for my keys.
+
+
+// Sync
+char const *chan = "my_channel";
+char const *msg;
+enum gateway_res res;
+
+res = gateway_here_now(pn, chan, NULL);
+if (res != PNR_STARTED) {
+  return -1;
+}
+
+res = gateway_await(pn);
+if (res == PNR_STARTED) {
+  return -1;
+}
+
+if (PNR_OK == res) {
+  msg = gateway_get(pn);
+  // Print out, on Windows simulator `puts(msg)` should work
+} else {
+  return -1;
+}
+
+return 0;
+
+
+//callback
+
+int start_here_now(gateway_t *pn) {
+  char const *chan = "my_channel";
+  if (PNR_STARTERD != gateway_here_now(pn, chan, NULL)) {
+    return -1;
+  }
+  return 0;
+}
+int receive_here_now(gateway_t *pn, enum gateway_res res) {
+  char const *msg;
+  if (res == PNR_STARTED) {
+    return -1;
+  }
+
+  if (PNR_OK == res) {
+    msg = gateway_get(pn);
+  // Print out, on Windows simulator `puts(msg)` should work
+  } else {
+    return -1;
+  }
+
+  return 0;
+}
+Presence
+Subscribe to realtime Presence events, such as join, leave, and timeout, by UUID. Setting the presence attribute to a callback will subscribe to presents events on my_channel:
+
+Requires that the Presence add-on is enabled for your key. How do I enable add-on features for my keys;
+// Sync
+char *presence_channel = malloc(strlen(channel) + strlen(PUBNUB_PRESENCE_SUFFIX) + 1);
+strcpy(presence_channel, channel);
+strcat(presence_channel, GATEWAY_PRESENCE_SUFFIX);
+gateway_subscribe(ctx, presence_channel, NULL);
+pbresult = gateway_await(ctx);
+if (PNR_OK == pbresult) {
+    char const *presence_event = gateway_get(ctx);
+    while (presnce_event != NULL) {
+        presence_event = gateway_get(ctx);
+    }
+}
+
+// Callback
+void some_function(gateway_t *ctx)
+{
+    char *presence_channel = malloc(strlen(channel) + strlen(GATEWAY_PRESENCE_SUFFIX) + 1);
+    strcpy(presence_channel, channel);
+    strcat(presence_channel, GATEWAY_PRESENCE_SUFFIX);
+    gateway_subscribe(ctx, presence_channel, NULL);
+}
+
+void example_callback(gateway_t *pb, enum gateway_trans trans, enum gateway_res result, void *user_data)
+{
+    if (PNR_OK == result) {
+        char const *presence_event = gateway_get(pb);
+        while (presence_event != NULL) {
+            presence_event = gateway_get(pb);
+        }
+    }
+}
+History
+Retrieve published messages from archival storage:
+
+Requires that the Storage and Playback add-on is enabled for your key. How do I enable add-on features for my keys
+
+/ Sync
+enum gateway_res res;
+const char *msg;
+
+gateway_history(pn, "history_channel", 10, false);
+res = gateway_await(pn);
+if (PNR_OK == res) {
+  for (;;) {
+    msg = gateway_get(pn);
+    if (NULL == msg) {
+      break;
+    }
+    // Print out, on Window simulator, `puts(msg)` should work
+  }
+} else {
+}
+
+
+// Callback
+void start_get_last_10_messages(gateway_t *pn) {
+  enum gateway_res res;
+  const char *msg;
+
+  gateway_history(pn, "history_channel", 10, false);
+}
+
+void receive_last_10_messages(gateway_t *pn, enum gateway_res res) {
+
+  if (PNR_OK == res) {
+    for (;;) {
+      msg = gateway_get(pn);
+      if (NULL == msg) {
+        break;
+      }
+    // Print out, on Window simulator, `puts(msg)` should work
+    }
+  } else {
+     return -1;
+  }
+  return 0;
+}
+Unsubscribe
+Stop subscribing (listening) to a channel.
+
+To unsubscribe, you need to cancel a subscribe transaction.
+
+If you configured SDK to be thread-safe, you can cancel at any time, but, the cancelling may actually fail - i.e., your thread may wait for another thread to finish working with the context, and by the time your cancel request gets processed, the transaction may finish.
+
+If you configured SDK to not be thread-safe, the only safe way to do it is to use the sync interface and:
+
+    Set the context to use non-blocking I/O
+    Wait for the outcome in a loop, checking for gateway_last_result() - rather than calling gateway_await()
+    If a condition occurs
+    that prompts you to unsubscribe, call gateway_cancel()
+    Wait for the cancellation to finish (here you can call gateway_await(), unless you want to do other stuff while you wait)
+
+pbresult = gateway_subscribe(ctx, "my_channel", NULL);
+/* If we don't set non-blocking I/O, we can't get out of a blocked read */
+gateway_set_non_blocking_io(ctx);
+/* Can't use gateway_await() here, it will block */
+while (PNR_STARTED == pbresult) {
+    pbresult = gateway_last_result(ctx);
+    /* Somehow decide we want to quit / unsubscribe */
+    if (should_stop()) {
+        gateway_cancel(ctx);
+        /* If we don't have anything else to do, it's OK to await now,
+        but you could again have a loop "against" gateway_last_result()
+        */
+        pbresult = gateway_await(ctx);
+        break;
+    }
+}
+if (PNR_CANCELLED == pbresult) {
+    puts("Subscribe cancelled - unsubscribed!");
+}
